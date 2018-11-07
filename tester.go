@@ -1,0 +1,265 @@
+package main
+
+import (
+	"bytes"
+	"debug/elf"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"log"
+	"net"
+	"os"
+	"os/exec"
+	"path"
+	"strings"
+	"syscall"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+
+	"github.com/cavaliercoder/go-cpio"
+)
+
+const (
+	initFile     = "init/test.go"
+	kernelModule = "PF_RING/kernel/pf_ring.ko"
+	kernelFile   = "linux-4.9.135/arch/x86_64/boot/bzImage"
+)
+
+func clen(n []byte) int {
+	for i := 0; i < len(n); i++ {
+		if n[i] == 0 {
+			return i
+		}
+	}
+	return len(n)
+}
+
+func getInterp(fname string) (string, error) {
+	binary, err := elf.Open(fname)
+	if err != nil {
+		return "", nil
+	}
+	for _, prog := range binary.Progs {
+		if prog.Type != elf.PT_INTERP {
+			continue
+		}
+		tmp := make([]byte, prog.Filesz)
+		n, err := prog.ReadAt(tmp, 0)
+		if err != nil {
+			log.Fatalln("Error during determining interp:", err)
+		}
+		if n != int(prog.Filesz) {
+			log.Fatalln("Couldn't read interp fully")
+		}
+		return string(tmp[:clen(tmp)]), nil
+	}
+	return "", nil
+}
+
+func parseLibs(out []byte) (ret []string) {
+	lines := bytes.Split(out, []byte("\n"))
+	for _, line := range lines {
+		splitline := bytes.SplitN(line, []byte("=>"), 2)
+		if len(splitline) != 2 {
+			continue
+		}
+		libline := bytes.TrimSpace(splitline[1])
+		lib := string(libline[:bytes.IndexByte(libline, ' ')])
+		ret = append(ret, lib)
+	}
+	return ret
+}
+
+func getLibsLdSO(interp, fname string) (ret []string, err error) {
+	interpOut, err := exec.Command(interp, "--list", fname).Output()
+	if err != nil {
+		return
+	}
+	return parseLibs(interpOut), nil
+}
+
+func getLibsLdd(fname string) (ret []string, err error) {
+	interpOut, err := exec.Command("ldd", fname).Output()
+	if err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			if exit.Sys().(syscall.WaitStatus).ExitStatus() == 1 {
+				log.Println("   Not a dynamic lib/executable")
+				return nil, nil
+			}
+		}
+		return
+	}
+	return parseLibs(interpOut), nil
+}
+
+func handleNetwork(conn net.Conn) {
+	len := make([]byte, 4)
+	buf := make([]byte, 4096)
+	for {
+		_, err := io.ReadFull(conn, len)
+		if err != nil {
+			return
+		}
+		n := binary.BigEndian.Uint32(len)
+		if cap(buf) < int(n) {
+			buf = make([]byte, n)
+		} else {
+			buf = buf[:n]
+		}
+		_, err = io.ReadFull(conn, buf)
+		if err != nil {
+			return
+		}
+		log.Println("received: ", gopacket.NewPacket(buf, layers.LayerTypeEthernet, gopacket.NoCopy).Dump())
+	}
+}
+
+func addFile(w *cpio.Writer, name, file string) {
+	if name[:1] == "/" {
+		name = string(name[1:])
+	}
+	dirs := strings.Split(name, "/")
+	for i := range dirs[:len(dirs)-1] {
+		dir := strings.Join(dirs[:i+1], "/")
+		if _, ok := writtenPaths[dir]; !ok {
+			h := &cpio.Header{
+				Name: dir,
+				Size: 0,
+				Mode: 040555,
+			}
+			err := w.WriteHeader(h)
+			if err != nil {
+				log.Fatal(err)
+			}
+			writtenPaths[dir] = struct{}{}
+		}
+	}
+
+	f, err := os.Open(file)
+	if err != nil {
+		log.Fatalf("Couldn't open %s: %s\n", file, err)
+	}
+	defer f.Close()
+	fStat, err := f.Stat()
+	if err != nil {
+		log.Fatalf("Couldn't examine %s: %s\n", file, err)
+	}
+	hdr, err := cpio.FileInfoHeader(fStat, "")
+	hdr.Name = name
+	err = w.WriteHeader(hdr)
+	if err != nil {
+		log.Fatalf("Error writing initrd header for %s: %s\n", name, err)
+	}
+	_, err = io.Copy(w, f)
+	if err != nil {
+		log.Fatalf("Couldn't add %s to initrd: %s\n", name, err)
+	}
+}
+
+var writtenPaths map[string]struct{}
+
+func main() {
+	writtenPaths = make(map[string]struct{})
+	initBinary, err := ioutil.TempFile("", "")
+	if err != nil {
+		log.Fatal("Couldn't create tempfile for binary: ", err)
+	}
+	fname := initBinary.Name()
+	defer os.Remove(fname)
+	initBinary.Close()
+	build := exec.Command("go", "build", "-o", fname, initFile)
+	build.Stdout = os.Stdout
+	build.Stderr = os.Stderr
+	err = build.Run()
+	if err != nil {
+		log.Fatal("Couldn't build guest binary: ", err)
+	}
+
+	initRd, err := ioutil.TempFile("", "")
+	if err != nil {
+		log.Fatal("Couldn't create tempfile for initrd: ", err)
+	}
+	defer initRd.Close()
+	defer os.Remove(initRd.Name())
+
+	var libs []string
+
+	interp, err := getInterp(fname)
+	if err != nil {
+		log.Fatalln("Couldn't determine interp:", err)
+	}
+	if interp == "" {
+		l, err := getLibsLdd(fname)
+		if err != nil {
+			log.Fatalln("Couldn't get libs:", err)
+		}
+		libs = l
+	} else {
+		l, err := getLibsLdSO(interp, fname)
+		if err != nil {
+			log.Fatalln("Couldn't get libraries:", err)
+		}
+		libs = l
+	}
+
+	w := cpio.NewWriter(initRd)
+	h := &cpio.Header{
+		Name: ".",
+		Size: 0,
+		Mode: 040555,
+	}
+	err = w.WriteHeader(h)
+	if err != nil {
+		log.Fatal(err)
+	}
+	addFile(w, "init", fname)
+	addFile(w, "pf_ring.ko", kernelModule)
+	if interp != "" {
+		addFile(w, string(interp[1:]), interp)
+	}
+	for _, lib := range libs {
+		addFile(w, path.Join("usr/lib", path.Base(lib)), lib)
+	}
+
+	err = w.Close()
+	if err != nil {
+		log.Fatal("Error finishing initrd: ", err)
+	}
+
+	os.Remove(fname)
+
+	ln, err := net.Listen("tcp", ":1234")
+	if err != nil {
+		log.Fatal("Couldn't start network listen conn")
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				log.Fatal("Error during accept: ", err)
+			}
+			fmt.Println("Connect from machine")
+			go handleNetwork(conn)
+		}
+	}()
+
+	runner := exec.Command("qemu-system-x86_64",
+		"-m", "500M",
+		"-display", "none",
+		"-nographic",
+		"-nodefaults",
+		"-serial", "stdio",
+		"-kernel", kernelFile,
+		"-initrd", initRd.Name(),
+		"-append", "console=ttyS0",
+		"-device", "virtio-net-pci,netdev=net0", "-netdev", "socket,id=net0,connect=localhost:1234",
+		"-no-reboot")
+	runner.Stdout = os.Stdout
+	runner.Stderr = os.Stderr
+	err = runner.Run()
+	if err != nil {
+		log.Fatal("Error running tester: ", err)
+	}
+}
