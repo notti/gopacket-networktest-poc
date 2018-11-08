@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"debug/elf"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
@@ -97,7 +96,7 @@ func getLibsLdd(fname string) (ret []string, err error) {
 	return parseLibs(interpOut), nil
 }
 
-func handleNetwork(conn net.Conn) {
+func handleNetwork(conn *os.File) {
 	plen := make([]byte, 4)
 	buf := make([]byte, 4096)
 	for {
@@ -277,20 +276,12 @@ func main() {
 
 	os.Remove(fname)
 
-	ln, err := net.Listen("tcp", ":1234")
+	netFds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
 	if err != nil {
-		log.Fatal("Couldn't start network listen conn")
+		log.Fatal("Could not create socket pair")
 	}
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				log.Fatal("Error during accept: ", err)
-			}
-			fmt.Println("Connect from machine")
-			go handleNetwork(conn)
-		}
-	}()
+	netMaster := os.NewFile(uintptr(netFds[0]), "netMaster")
+	go handleNetwork(netMaster)
 
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
 	if err != nil {
@@ -327,11 +318,11 @@ func main() {
 		"-chardev", "stdio,id=tty", "-device", "virtconsole,chardev=tty",
 		"-add-fd", "set=1,fd=3",
 		"-chardev", "pipe,path=/dev/fdset/1,id=ctrl", "-device", "virtserialport,chardev=ctrl",
-		"-netdev", "socket,id=net0,connect=localhost:1234", "-device", "virtio-net-pci,netdev=net0",
+		"-netdev", "socket,id=net0,fd=4", "-device", "virtio-net-pci,netdev=net0",
 		"-no-reboot")
 	runner.Stdout = os.Stdout
 	runner.Stderr = os.Stderr
-	runner.ExtraFiles = []*os.File{os.NewFile(uintptr(fds[1]), "slave")}
+	runner.ExtraFiles = []*os.File{os.NewFile(uintptr(fds[1]), "slave"), os.NewFile(uintptr(netFds[1]), "netSlave")}
 	err = runner.Run()
 	if err != nil {
 		log.Fatal("Error running tester: ", err)
