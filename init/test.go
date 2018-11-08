@@ -1,14 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net"
 	"os"
-	"syscall"
-	"time"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/google/gopacket"
 
@@ -18,6 +19,23 @@ import (
 )
 
 func main() {
+	if err := unix.Mount("", "/dev", "devtmpfs", uintptr(0), ""); err != nil {
+		log.Fatal("Failed mounting devtmpfs")
+	}
+	if test, err := os.OpenFile("/dev/vport0p1", os.O_RDWR, 0); err != nil {
+		log.Fatal("Couldn't open stuff: ", err)
+	} else {
+		if _, err := test.WriteString("test\n"); err != nil {
+			log.Fatal("Could not write stuff: ", err)
+		}
+		testReader := bufio.NewReader(test)
+		if res, err := testReader.ReadString('\n'); err != nil {
+			log.Fatal("Could not read stuff: ", err)
+		} else {
+			log.Println("got: ", res)
+		}
+		test.Close()
+	}
 	fmt.Println("Hello world")
 	mod, err := os.Open("pf_ring.ko")
 	if err != nil {
@@ -29,7 +47,7 @@ func main() {
 	}
 	log.Println(len(image))
 	opts := []byte{0}
-	_, _, e := syscall.Syscall(syscall.SYS_INIT_MODULE, uintptr(unsafe.Pointer(&image[0])), uintptr(len(image)), uintptr(unsafe.Pointer(&opts[0])))
+	_, _, e := unix.Syscall(unix.SYS_INIT_MODULE, uintptr(unsafe.Pointer(&image[0])), uintptr(len(image)), uintptr(unsafe.Pointer(&opts[0])))
 	if e != 0 {
 		log.Fatal("failed initing stuff: ", e.Error())
 	}
@@ -104,6 +122,11 @@ func main() {
 	if err != nil {
 		log.Fatal("error sending packet: ", err)
 	}
-	time.Sleep(3 * time.Second)
-	syscall.Reboot(syscall.LINUX_REBOOT_CMD_RESTART)
+	data, ci, err := ring.ZeroCopyReadPacketData()
+	if err != nil {
+		log.Fatal("error receiving packet: ", err)
+	}
+	log.Println("answer: ", ci, "\n", gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.NoCopy).Dump())
+	log.Println("finished")
+	unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART)
 }

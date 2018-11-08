@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"debug/elf"
 	"encoding/binary"
@@ -14,6 +15,8 @@ import (
 	"path"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -95,14 +98,14 @@ func getLibsLdd(fname string) (ret []string, err error) {
 }
 
 func handleNetwork(conn net.Conn) {
-	len := make([]byte, 4)
+	plen := make([]byte, 4)
 	buf := make([]byte, 4096)
 	for {
-		_, err := io.ReadFull(conn, len)
+		_, err := io.ReadFull(conn, plen)
 		if err != nil {
 			return
 		}
-		n := binary.BigEndian.Uint32(len)
+		n := binary.BigEndian.Uint32(plen)
 		if cap(buf) < int(n) {
 			buf = make([]byte, n)
 		} else {
@@ -113,6 +116,50 @@ func handleNetwork(conn net.Conn) {
 			return
 		}
 		log.Println("received: ", gopacket.NewPacket(buf, layers.LayerTypeEthernet, gopacket.NoCopy).Dump())
+
+		out := gopacket.NewSerializeBuffer()
+		opt := gopacket.SerializeOptions{
+			FixLengths:       true,
+			ComputeChecksums: true,
+		}
+
+		eth := layers.Ethernet{
+			SrcMAC:       net.HardwareAddr{6, 5, 4, 3, 2, 1},
+			DstMAC:       net.HardwareAddr{1, 2, 3, 4, 5, 6},
+			EthernetType: layers.EthernetTypeIPv4,
+		}
+		ip4 := layers.IPv4{
+			Version:  4,
+			SrcIP:    net.IPv4(192, 168, 0, 2),
+			DstIP:    net.IPv4(192, 168, 0, 1),
+			Protocol: layers.IPProtocolUDP,
+			TTL:      100,
+		}
+		udp := layers.UDP{
+			SrcPort: 1,
+			DstPort: 1,
+		}
+		udp.SetNetworkLayerForChecksum(&ip4)
+
+		err = gopacket.SerializeLayers(out, opt,
+			&eth,
+			&ip4,
+			&udp,
+			gopacket.Payload([]byte{'t', 'e', 's', 't'}))
+		if err != nil {
+			log.Fatal("Could not packet stuff together: ", err)
+		}
+		packetData := out.Bytes()
+		log.Println("host: sending: ", gopacket.NewPacket(packetData, layers.LayerTypeEthernet, gopacket.NoCopy).Dump())
+		binary.BigEndian.PutUint32(plen, uint32(len(packetData)))
+		_, err = conn.Write(plen)
+		if err != nil {
+			log.Fatal("Could not send length")
+		}
+		_, err = conn.Write(packetData)
+		if err != nil {
+			log.Fatal("Could not send packet")
+		}
 	}
 }
 
@@ -245,19 +292,46 @@ func main() {
 		}
 	}()
 
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		log.Fatal("Could not create socket pair")
+	}
+	ctrl := os.NewFile(uintptr(fds[0]), "ctrl")
+	ctrlReader := bufio.NewReader(ctrl)
+	go func() {
+		for {
+			data, err := ctrlReader.ReadString('\n')
+			if err != nil {
+				log.Fatal("Error during ctrl-read: ", err)
+			}
+			log.Println("Got ctrl data: ", data)
+			_, err = ctrl.WriteString("yay\n")
+			if err != nil {
+				log.Fatal("Error during ctrl-write: ", err)
+			}
+		}
+	}()
+
 	runner := exec.Command("qemu-system-x86_64",
 		"-m", "500M",
-		"-display", "none",
+		"-vga", "none",
 		"-nographic",
 		"-nodefaults",
-		"-serial", "stdio",
+		"-nodefconfig",
+		"-no-user-config",
+		"-serial", "none",
 		"-kernel", kernelFile,
 		"-initrd", initRd.Name(),
-		"-append", "console=ttyS0",
-		"-device", "virtio-net-pci,netdev=net0", "-netdev", "socket,id=net0,connect=localhost:1234",
+		"-append", "console=hvc0",
+		"-device", "virtio-serial",
+		"-chardev", "stdio,id=tty", "-device", "virtconsole,chardev=tty",
+		"-add-fd", "set=1,fd=3",
+		"-chardev", "pipe,path=/dev/fdset/1,id=ctrl", "-device", "virtserialport,chardev=ctrl",
+		"-netdev", "socket,id=net0,connect=localhost:1234", "-device", "virtio-net-pci,netdev=net0",
 		"-no-reboot")
 	runner.Stdout = os.Stdout
 	runner.Stderr = os.Stderr
+	runner.ExtraFiles = []*os.File{os.NewFile(uintptr(fds[1]), "slave")}
 	err = runner.Run()
 	if err != nil {
 		log.Fatal("Error running tester: ", err)
