@@ -68,7 +68,11 @@ func parseLibs(out []byte) (ret []string) {
 			continue
 		}
 		libline := bytes.TrimSpace(splitline[1])
-		lib := string(libline[:bytes.IndexByte(libline, ' ')])
+		n := bytes.IndexByte(libline, ' ')
+		if n == -1 {
+			continue
+		}
+		lib := string(libline[:n])
 		ret = append(ret, lib)
 	}
 	return ret
