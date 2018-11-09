@@ -1,5 +1,5 @@
 language: go
 before_install:
-  - ./travis.install.sh
+  - ./.travis.install.sh
 script:
   - go run tester.go
