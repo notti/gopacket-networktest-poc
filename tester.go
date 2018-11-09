@@ -317,7 +317,7 @@ func main() {
 		"-serial", "stdio",
 		"-kernel", kernelFile,
 		"-initrd", initRd.Name(),
-		"-append", "console=ttyS0",
+		"-append", "console=ttyS0 quiet loglevel=1",
 		"-device", "virtio-serial",
 		"-add-fd", "set=1,fd=3",
 		"-chardev", "pipe,path=/dev/fdset/1,id=ctrl", "-device", "virtserialport,chardev=ctrl",
