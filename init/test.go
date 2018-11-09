@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"fmt"
 	"io/ioutil"
 	"log"
 	"net"
@@ -32,11 +31,11 @@ func main() {
 		if res, err := testReader.ReadString('\n'); err != nil {
 			log.Fatal("Could not read stuff: ", err)
 		} else {
-			log.Println("got: ", res)
+			log.Println("[GUEST] got: ", res)
 		}
 		test.Close()
 	}
-	fmt.Println("Hello world")
+	log.Println("[GUEST] Hello world")
 	mod, err := os.Open("pf_ring.ko")
 	if err != nil {
 		log.Fatal("failed opening stuff: ", err)
@@ -45,7 +44,6 @@ func main() {
 	if err != nil {
 		log.Fatal("failed loading stuff: ", err)
 	}
-	log.Println(len(image))
 	opts := []byte{0}
 	_, _, e := unix.Syscall(unix.SYS_INIT_MODULE, uintptr(unsafe.Pointer(&image[0])), uintptr(len(image)), uintptr(unsafe.Pointer(&opts[0])))
 	if e != 0 {
@@ -66,7 +64,7 @@ func main() {
 		log.Fatal("failed adding address to link: ", err)
 	}
 	ifaces, err := net.Interfaces()
-	fmt.Println(ifaces, err)
+	log.Println("[GUEST] ", ifaces, err)
 	ring, err := pfring.NewRing("eth0", 65536, pfring.FlagPromisc)
 	if err != nil {
 		log.Fatal("could not ring around: ", err)
@@ -117,7 +115,7 @@ func main() {
 		log.Fatal("Could not packet stuff together: ", err)
 	}
 	packetData := buf.Bytes()
-	log.Println(gopacket.NewPacket(packetData, layers.LayerTypeEthernet, gopacket.NoCopy).Dump())
+	log.Println("[GUEST] ", gopacket.NewPacket(packetData, layers.LayerTypeEthernet, gopacket.NoCopy).Dump())
 	err = ring.WritePacketData(packetData)
 	if err != nil {
 		log.Fatal("error sending packet: ", err)
@@ -126,7 +124,7 @@ func main() {
 	if err != nil {
 		log.Fatal("error receiving packet: ", err)
 	}
-	log.Println("answer: ", ci, "\n", gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.NoCopy).Dump())
-	log.Println("finished")
+	log.Println("[GUEST] answer: ", ci, "\n", gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.NoCopy).Dump())
+	log.Println("[GUEST] finished")
 	unix.Reboot(unix.LINUX_REBOOT_CMD_RESTART)
 }

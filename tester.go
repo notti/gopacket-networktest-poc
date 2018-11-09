@@ -118,7 +118,7 @@ func handleNetwork(conn *os.File) {
 		if err != nil {
 			return
 		}
-		log.Println("received: ", gopacket.NewPacket(buf, layers.LayerTypeEthernet, gopacket.NoCopy).Dump())
+		log.Println("[HOST] received: ", gopacket.NewPacket(buf, layers.LayerTypeEthernet, gopacket.NoCopy).Dump())
 
 		out := gopacket.NewSerializeBuffer()
 		opt := gopacket.SerializeOptions{
@@ -153,7 +153,7 @@ func handleNetwork(conn *os.File) {
 			log.Fatal("Could not packet stuff together: ", err)
 		}
 		packetData := out.Bytes()
-		log.Println("host: sending: ", gopacket.NewPacket(packetData, layers.LayerTypeEthernet, gopacket.NoCopy).Dump())
+		log.Println("[HOST] sending: ", gopacket.NewPacket(packetData, layers.LayerTypeEthernet, gopacket.NoCopy).Dump())
 		binary.BigEndian.PutUint32(plen, uint32(len(packetData)))
 		_, err = conn.Write(plen)
 		if err != nil {
@@ -299,7 +299,7 @@ func main() {
 			if err != nil {
 				log.Fatal("Error during ctrl-read: ", err)
 			}
-			log.Println("Got ctrl data: ", data)
+			log.Println("[HOST] Got ctrl data: ", data)
 			_, err = ctrl.WriteString("yay\n")
 			if err != nil {
 				log.Fatal("Error during ctrl-write: ", err)
