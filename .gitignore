@@ -1,3 +1,4 @@
 PF_RING
 linux-*
 !linux-*/.config
+!PF_RING/kernel/pf_ring.ko
