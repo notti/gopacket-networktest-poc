@@ -1,5 +1,6 @@
 language: go
 before_install:
   - ./.travis.install.sh
+  - ./.travis.gopacket_pfring.sh
 script:
   - go run tester.go
